@@ -166,7 +166,7 @@ function postCard(p) {
 
 function feed(query, emptyText) {
   const list = h('div', { class: 'stack' });
-  const more = h('button', { style: 'display:block;margin:20px auto 0' }, 'Load more');
+  const more = h('button', { class: 'more' }, 'Load more');
   let before = null;
   async function load() {
     more.disabled = true;
