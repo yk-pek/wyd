@@ -136,8 +136,17 @@ main.wrap { padding-top: 16px; padding-bottom: 40px; }
 .chip { display: flex; align-items: center; gap: 8px; font-size: 14px; }
 .dot { width: 22px; height: 22px; border-radius: 50%; flex: none; }
 
+.overlay { position: fixed; inset: 0; z-index: 20; background: rgba(0,0,0,.45); display: grid; place-items: center; padding: 20px; }
+.modal { width: 100%; max-width: 420px; }
+.modal h2 { margin: 0; font-size: 18px; }
+.modal p { margin: 12px 0 0; }
+.modal .stack { margin-top: 14px; }
+.wallet-option { width: 100%; display: flex; align-items: center; gap: 10px; border-radius: 10px; padding: 10px 14px; text-align: left; }
+.wallet-option img { border-radius: 6px; }
+.wallet-option.last { border-color: var(--accent); }
+
 .toast {
-  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 30;
   background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 10px; font-size: 14px;
   box-shadow: 0 6px 24px rgba(0,0,0,.18); max-width: calc(100% - 40px);
 }

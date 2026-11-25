@@ -81,25 +81,114 @@ function toHex(str) {
   return '0x' + Array.from(new TextEncoder().encode(str), (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+// Wallets announce themselves through EIP-6963, so several can coexist
+// (e.g. Brave Wallet + MetaMask). window.ethereum is the fallback for older wallets.
+const wallets = new Map();
+window.addEventListener('eip6963:announceProvider', (e) => {
+  if (e.detail && e.detail.info && e.detail.provider) wallets.set(e.detail.info.uuid, e.detail);
+});
+window.dispatchEvent(new Event('eip6963:requestProvider'));
+
+function availableWallets() {
+  const list = [...wallets.values()];
+  if (!list.length && window.ethereum) list.push({ info: { name: 'Browser wallet', rdns: 'injected' }, provider: window.ethereum });
+  return list;
+}
+
+function modal(title, ...content) {
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); overlay.onclose && overlay.onclose(); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  const overlay = h('div', { class: 'overlay', onclick: (e) => { if (e.target === overlay) close(); } },
+    h('div', { class: 'card modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+      h('div', { class: 'row' }, h('h2', null, title), h('button', { class: 'link', onclick: close, 'aria-label': 'Close' }, '✕')),
+      ...content));
+  overlay.close = close;
+  document.addEventListener('keydown', onKey);
+  document.body.append(overlay);
+  return overlay;
+}
+
+function noWalletHelp() {
+  const brave = !!navigator.brave;
+  modal('No wallet found',
+    h('p', null, 'wyd uses a crypto wallet to sign you in. It\'s only a signature: no gas, no transaction, no funds needed.'),
+    brave
+      ? h('p', null, 'You\'re on Brave. Either set up Brave\'s built-in wallet (click the wallet icon in the toolbar, or open brave://wallet), or install MetaMask or Rabby. Then reload this page.')
+      : h('p', null, 'Install a browser wallet such as MetaMask or Rabby, then reload this page.'),
+    h('p', { class: 'hint' }, 'On a phone, open wyd inside your wallet app\'s browser.')
+  );
+}
+
+function pickWallet() {
+  const list = availableWallets();
+  if (list.length <= 1) return Promise.resolve(list[0] || null);
+  const last = localStorage.getItem('wyd-wallet');
+  return new Promise((resolve) => {
+    const m = modal('Choose a wallet',
+      h('div', { class: 'stack' }, list.map((w) =>
+        h('button', { class: 'wallet-option' + (w.info.rdns === last ? ' last' : ''), onclick: () => { m.onclose = null; m.close(); resolve(w); } },
+          w.info.icon ? h('img', { src: w.info.icon, alt: '', width: 24, height: 24 }) : null,
+          h('span', null, w.info.name),
+          w.info.rdns === last ? h('span', { class: 'hint', style: 'margin:0 0 0 auto' }, 'last used') : null))));
+    m.onclose = () => resolve(null);
+  });
+}
+
+function walletError(err) {
+  const code = err && (err.code ?? (err.data && err.data.code));
+  if (code === 4001 || code === 'ACTION_REJECTED') return 'Sign-in cancelled in your wallet';
+  if (code === -32002) return 'Your wallet already has a request waiting. Open it from the browser toolbar to finish.';
+  return (err && err.message) || 'Sign-in failed';
+}
+
+let signingIn = false;
 async function signIn() {
-  if (!window.ethereum) {
-    toast('No wallet found. Install a browser wallet like MetaMask or Rabby, then reload.');
+  if (signingIn) {
+    toast('Waiting for your wallet. If no window appeared, click the wallet icon in your browser toolbar.');
     return;
   }
+  const wallet = await pickWallet();
+  if (!wallet) {
+    if (!availableWallets().length) noWalletHelp();
+    return;
+  }
+  const provider = wallet.provider;
+  signingIn = true;
+  setConnectLabel('Check your wallet…');
+  const timeout = setTimeout(() => { signingIn = false; setConnectLabel(); }, 120_000);
   try {
-    const [address] = await window.ethereum.request({ method: 'eth_requestAccounts' });
-    if (!address) throw new Error('No account selected');
+    const [address] = await provider.request({ method: 'eth_requestAccounts' });
+    if (!address) throw new Error('No account selected in your wallet');
     const { nonce, message } = await api('/api/auth/nonce', { method: 'POST', body: { address } });
-    const signature = await window.ethereum.request({ method: 'personal_sign', params: [toHex(message), address] });
+    const signature = await provider.request({ method: 'personal_sign', params: [toHex(message), address] });
     const { user } = await api('/api/auth/verify', { method: 'POST', body: { nonce, signature } });
+    try { localStorage.setItem('wyd-wallet', wallet.info.rdns); } catch {}
+    watchAccounts(provider);
     state.user = user;
     renderAccount();
     route();
     toast('Signed in');
   } catch (err) {
-    if (err && err.code === 4001) toast('Sign-in cancelled');
-    else toast(err.message || 'Sign-in failed');
+    toast(walletError(err));
+  } finally {
+    clearTimeout(timeout);
+    signingIn = false;
+    setConnectLabel();
   }
+}
+
+function setConnectLabel(text) {
+  document.querySelectorAll('button.connect').forEach((b) => { b.textContent = text || 'Connect wallet'; });
+}
+
+// Sign out if the person switches to a different account in the wallet they signed in with.
+let watched = null;
+function watchAccounts(provider) {
+  if (watched === provider || !provider.on) return;
+  watched = provider;
+  provider.on('accountsChanged', (accounts) => {
+    if (state.user && (!accounts[0] || accounts[0].toLowerCase() !== state.user.address)) signOut();
+  });
 }
 
 async function signOut() {
@@ -118,7 +207,7 @@ function renderAccount() {
       h('button', { class: 'link', onclick: signOut }, 'Sign out')
     );
   } else {
-    $account.append(h('button', { class: 'primary', onclick: signIn }, 'Connect wallet'));
+    $account.append(h('button', { class: 'primary connect', onclick: signIn }, 'Connect wallet'));
   }
 }
 
@@ -165,7 +254,7 @@ function welcome() {
   return h('section', { class: 'card welcome' },
     h('h1', null, 'wyd?'),
     h('p', null, 'A place to share what you\'re building and see what everyone else is up to. Connect a wallet to post. It\'s just a signature: no gas, no transaction.'),
-    h('button', { class: 'primary', onclick: signIn }, 'Connect wallet')
+    h('button', { class: 'primary connect', onclick: signIn }, 'Connect wallet')
   );
 }
 
@@ -255,7 +344,7 @@ function ideasView(sort) {
     state.user ? composer('idea') : h('section', { class: 'card welcome' },
       h('h1', null, 'Ideas to build'),
       h('p', null, 'Things people wish existed. Upvote the ones you want, or pick one up and build it. Connect a wallet to suggest an idea.'),
-      h('button', { class: 'primary', onclick: signIn }, 'Connect wallet')),
+      h('button', { class: 'primary connect', onclick: signIn }, 'Connect wallet')),
     h('div', { class: 'section-head' },
       h('p', null, 'Upvote what you want to exist. Pick one up and run with it.'),
       h('div', { class: 'seg', role: 'tablist' },
@@ -302,7 +391,7 @@ async function postView(id) {
       },
     }, text, h('div', { class: 'row' }, counted(text, LIMITS.reply), send));
   } else {
-    replyBox = h('div', { class: 'card row' }, h('span', { class: 'meta' }, 'Connect a wallet to reply.'), h('button', { class: 'primary', onclick: signIn }, 'Connect wallet'));
+    replyBox = h('div', { class: 'card row' }, h('span', { class: 'meta' }, 'Connect a wallet to reply.'), h('button', { class: 'primary connect', onclick: signIn }, 'Connect wallet'));
   }
 
   const isIdea = post.kind === 'idea';
@@ -416,14 +505,15 @@ async function route() {
 }
 
 window.addEventListener('hashchange', route);
-if (window.ethereum && window.ethereum.on) {
-  window.ethereum.on('accountsChanged', (accounts) => {
-    if (state.user && (!accounts[0] || accounts[0].toLowerCase() !== state.user.address)) signOut();
-  });
-}
-
 (async () => {
   try { state.user = (await api('/api/me')).user; } catch { state.user = null; }
   renderAccount();
   route();
+  // Already signed in from an earlier visit: watch the wallet used last time.
+  if (state.user) {
+    let last = null;
+    try { last = localStorage.getItem('wyd-wallet'); } catch {}
+    const w = availableWallets().find((x) => x.info.rdns === last);
+    if (w) watchAccounts(w.provider);
+  }
 })();
