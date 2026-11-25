@@ -46,6 +46,24 @@ CREATE TABLE IF NOT EXISTS replies (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS replies_post_idx ON replies(post_id, id);
+
+-- Ideas: a post of kind 'idea' is a suggestion for something to build.
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'update';
+CREATE INDEX IF NOT EXISTS posts_kind_idx ON posts(kind, id DESC);
+
+CREATE TABLE IF NOT EXISTS idea_votes (
+  post_id    INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  address    TEXT NOT NULL REFERENCES users(address) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (post_id, address)
+);
+
+CREATE TABLE IF NOT EXISTS idea_builders (
+  post_id    INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  address    TEXT NOT NULL REFERENCES users(address) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (post_id, address)
+);
 `;
 
 async function init() {

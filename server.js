@@ -182,38 +182,68 @@ app.put('/api/me', wrap(async (req, res) => {
 
 // ---------- posts ----------
 
+const KINDS = ['update', 'idea'];
+const PAGE = 30;
+
+// Counts and "did I vote / am I building" flags for each post; $1 is the viewer's address ('' if signed out).
+const STATS_FIELDS = `
+  p.kind,
+  (SELECT COUNT(*)::int FROM replies r WHERE r.post_id = p.id) AS reply_count,
+  (SELECT COUNT(*)::int FROM idea_votes v WHERE v.post_id = p.id) AS vote_count,
+  (SELECT COUNT(*)::int FROM idea_builders b WHERE b.post_id = p.id) AS builder_count,
+  EXISTS (SELECT 1 FROM idea_votes v WHERE v.post_id = p.id AND v.address = $1) AS voted,
+  EXISTS (SELECT 1 FROM idea_builders b WHERE b.post_id = p.id AND b.address = $1) AS building`;
+
 app.get('/api/posts', wrap(async (req, res) => {
-  const params = [];
+  const params = [req.user ? req.user.address : ''];
   const where = [];
-  const before = parseInt(req.query.before, 10);
-  if (Number.isInteger(before) && before > 0) {
-    params.push(before);
-    where.push(`p.id < $${params.length}`);
-  }
-  if (typeof req.query.author === 'string' && isAddress(req.query.author)) {
-    params.push(req.query.author.toLowerCase());
+  const author = typeof req.query.author === 'string' && isAddress(req.query.author) ? req.query.author.toLowerCase() : null;
+  if (author) {
+    params.push(author);
     where.push(`p.author = $${params.length}`);
   }
+  // A profile shows everything a person posted; the main feeds show one kind.
+  const kind = KINDS.includes(req.query.kind) ? req.query.kind : author ? null : 'update';
+  if (kind) {
+    params.push(kind);
+    where.push(`p.kind = $${params.length}`);
+  }
+
+  let order;
+  let offset = 0;
+  if (req.query.sort === 'top') {
+    // Most-voted first; paginated by offset since the order isn't by id.
+    order = 'vote_count DESC, p.id DESC';
+    offset = Math.max(0, Math.min(parseInt(req.query.offset, 10) || 0, 10000));
+  } else {
+    order = 'p.id DESC';
+    const before = parseInt(req.query.before, 10);
+    if (Number.isInteger(before) && before > 0) {
+      params.push(before);
+      where.push(`p.id < $${params.length}`);
+    }
+  }
+
   const { rows } = await pool.query(
     `SELECT p.id, p.title, LEFT(p.body, 400) AS excerpt, LENGTH(p.body) > 400 AS truncated,
-            p.created_at, ${AUTHOR_FIELDS},
-            (SELECT COUNT(*)::int FROM replies r WHERE r.post_id = p.id) AS reply_count
+            p.created_at, ${AUTHOR_FIELDS}, ${STATS_FIELDS}
      FROM posts p JOIN users u ON u.address = p.author
      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-     ORDER BY p.id DESC LIMIT 30`,
+     ORDER BY ${order} LIMIT ${PAGE} OFFSET ${offset}`,
     params
   );
-  res.json({ posts: rows, more: rows.length === 30 });
+  res.json({ posts: rows, more: rows.length === PAGE });
 }));
 
 app.post('/api/posts', wrap(async (req, res) => {
   const user = requireUser(req);
   rateLimit(`post:${user.address}`, 5, 600_000);
+  const kind = req.body?.kind === 'idea' ? 'idea' : 'update';
   const title = cleanText(req.body?.title, 'Title', LIMITS.title);
-  const body = cleanText(req.body?.body, 'Post', LIMITS.body);
+  const body = cleanText(req.body?.body, kind === 'idea' ? 'Description' : 'Post', LIMITS.body);
   const { rows } = await pool.query(
-    'INSERT INTO posts (author, title, body) VALUES ($1, $2, $3) RETURNING id',
-    [user.address, title, body]
+    'INSERT INTO posts (author, kind, title, body) VALUES ($1, $2, $3, $4) RETURNING id',
+    [user.address, kind, title, body]
   );
   res.status(201).json({ id: rows[0].id });
 }));
@@ -227,11 +257,17 @@ function postId(req) {
 app.get('/api/posts/:id', wrap(async (req, res) => {
   const id = postId(req);
   const post = await pool.query(
-    `SELECT p.id, p.title, p.body, p.created_at, ${AUTHOR_FIELDS}
-     FROM posts p JOIN users u ON u.address = p.author WHERE p.id = $1`,
-    [id]
+    `SELECT p.id, p.title, p.body, p.created_at, ${AUTHOR_FIELDS}, ${STATS_FIELDS}
+     FROM posts p JOIN users u ON u.address = p.author WHERE p.id = $2`,
+    [req.user ? req.user.address : '', id]
   );
   if (!post.rows[0]) throw new HttpError(404, 'Post not found');
+  const builders = await pool.query(
+    `SELECT b.address, COALESCE(u.display_name, '') AS name, b.created_at
+     FROM idea_builders b JOIN users u ON u.address = b.address WHERE b.post_id = $1 ORDER BY b.created_at`,
+    [id]
+  );
+  post.rows[0].builders = builders.rows;
   const replies = await pool.query(
     `SELECT p.id, p.body, p.created_at, ${AUTHOR_FIELDS}
      FROM replies p JOIN users u ON u.address = p.author WHERE p.post_id = $1 ORDER BY p.id`,
@@ -260,6 +296,31 @@ app.post('/api/posts/:id/replies', wrap(async (req, res) => {
   );
   res.status(201).json({ id: rows[0].id });
 }));
+
+// Upvote an idea, or say you're building it. PUT turns it on, DELETE turns it off.
+async function ideaFor(req) {
+  const id = postId(req);
+  const { rows } = await pool.query('SELECT kind FROM posts WHERE id = $1', [id]);
+  if (!rows[0]) throw new HttpError(404, 'Idea not found');
+  if (rows[0].kind !== 'idea') throw new HttpError(400, 'Only ideas can be voted on or picked up');
+  return id;
+}
+
+for (const [route, table] of [['vote', 'idea_votes'], ['build', 'idea_builders']]) {
+  app.put(`/api/posts/:id/${route}`, wrap(async (req, res) => {
+    const user = requireUser(req);
+    rateLimit(`${route}:${user.address}`, 60, 600_000);
+    const id = await ideaFor(req);
+    await pool.query(`INSERT INTO ${table} (post_id, address) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [id, user.address]);
+    res.json({ ok: true });
+  }));
+  app.delete(`/api/posts/:id/${route}`, wrap(async (req, res) => {
+    const user = requireUser(req);
+    const id = await ideaFor(req);
+    await pool.query(`DELETE FROM ${table} WHERE post_id = $1 AND address = $2`, [id, user.address]);
+    res.json({ ok: true });
+  }));
+}
 
 app.delete('/api/replies/:id', wrap(async (req, res) => {
   const user = requireUser(req);

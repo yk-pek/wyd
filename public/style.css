@@ -66,7 +66,40 @@ textarea { resize: vertical; min-height: 90px; }
 /* cards */
 .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; }
 .stack > * + * { margin-top: 14px; }
-main.wrap { padding-top: 24px; padding-bottom: 40px; }
+main.wrap { padding-top: 16px; padding-bottom: 40px; }
+
+/* section tabs */
+.tabs { display: flex; gap: 6px; padding-top: 18px; }
+.tabs a { text-decoration: none; font-size: 14px; font-weight: 600; color: var(--muted); padding: 7px 14px; border-radius: 999px; }
+.tabs a:hover { color: var(--ink); }
+.tabs a.active { background: var(--ink); color: var(--bg); }
+
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 6px 0 -2px; }
+.section-head p { margin: 0; color: var(--muted); font-size: 14px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 2px; background: var(--card); flex: none; }
+.seg a { text-decoration: none; font-size: 13px; font-weight: 600; color: var(--muted); padding: 4px 12px; border-radius: 999px; }
+.seg a.active { background: var(--accent-soft); color: var(--accent); }
+
+/* ideas */
+.idea-card { display: flex; gap: 14px; align-items: flex-start; }
+.idea-card .post-link { flex: 1; min-width: 0; border: 0; padding: 0; background: none; }
+.vote {
+  flex: none; display: flex; flex-direction: column; align-items: center; gap: 0;
+  min-width: 48px; padding: 6px 8px; border-radius: 10px; line-height: 1.2;
+}
+.vote .arrow { font-size: 12px; }
+.vote .n { font: 700 15px var(--mono); }
+.vote.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.pill.idea { background: transparent; border: 1px solid var(--accent); }
+.pill.build { background: #e7f6ec; color: #1f7a3f; }
+@media (prefers-color-scheme: dark) { .pill.build { background: #173322; color: #7fd69c; } }
+.build-btn.on { background: #1f7a3f; border-color: #1f7a3f; color: #fff; }
+.builders { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.builders h4 { margin: 0 0 8px; font-size: 14px; }
+.builders ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.builders li a { display: flex; align-items: center; gap: 6px; text-decoration: none; font-size: 14px; border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px 3px 4px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.hint { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
 .more { display: block; margin: 20px auto 0; }
 [hidden] { display: none !important; }
 

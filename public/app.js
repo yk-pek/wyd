@@ -123,17 +123,31 @@ function renderAccount() {
 }
 
 // ---------- views ----------
-function composer() {
-  const title = h('input', { class: 'title-input', placeholder: 'What are you working on?', maxlength: LIMITS.title, 'aria-label': 'Title' });
-  const body = h('textarea', { placeholder: 'Tell people about it: what it is, where you are, what\'s next, where you\'re stuck…', rows: 4, 'aria-label': 'Details' });
-  const submit = h('button', { class: 'primary', type: 'submit' }, 'Post');
+const COPY = {
+  update: {
+    title: 'What are you working on?',
+    body: 'Tell people about it: what it is, where you are, what\'s next, where you\'re stuck…',
+    button: 'Post',
+  },
+  idea: {
+    title: 'What should someone build?',
+    body: 'Describe the idea: the problem, who it\'s for, what a first version could look like…',
+    button: 'Suggest it',
+  },
+};
+
+function composer(kind = 'update') {
+  const copy = COPY[kind];
+  const title = h('input', { class: 'title-input', placeholder: copy.title, maxlength: LIMITS.title, 'aria-label': 'Title' });
+  const body = h('textarea', { placeholder: copy.body, rows: 4, 'aria-label': 'Details' });
+  const submit = h('button', { class: 'primary', type: 'submit' }, copy.button);
   const form = h('form', {
     class: 'card composer',
     onsubmit: async (e) => {
       e.preventDefault();
       submit.disabled = true;
       try {
-        const { id } = await api('/api/posts', { method: 'POST', body: { title: title.value, body: body.value } });
+        const { id } = await api('/api/posts', { method: 'POST', body: { kind, title: title.value, body: body.value } });
         location.hash = `#/p/${id}`;
       } catch (err) {
         toast(err.message);
@@ -155,28 +169,67 @@ function welcome() {
   );
 }
 
-function postCard(p) {
-  return h('a', { href: `#/p/${p.id}`, class: 'card post-link' },
-    h('h2', { class: 'post-title' }, p.title),
-    byline(p.author, p.author_name, p.created_at,
-      p.reply_count ? h('span', { class: 'pill' }, `${p.reply_count} ${p.reply_count === 1 ? 'reply' : 'replies'}`) : null),
-    h('p', { class: 'excerpt' }, p.excerpt + (p.truncated ? '…' : ''))
-  );
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+function pills(p, showKind) {
+  return [
+    showKind && p.kind === 'idea' ? h('span', { class: 'pill idea' }, 'idea') : null,
+    p.builder_count ? h('span', { class: 'pill build' }, `${p.builder_count} building`) : null,
+    p.reply_count ? h('span', { class: 'pill' }, plural(p.reply_count, 'reply', 'replies')) : null,
+  ];
 }
 
-function feed(query, emptyText) {
+// Upvote toggle for an idea. Updates itself in place.
+function voteButton(p) {
+  const n = h('span', { class: 'n' }, p.vote_count);
+  const btn = h('button', {
+    class: 'vote' + (p.voted ? ' on' : ''),
+    title: p.voted ? 'Remove your vote' : 'Upvote: I want this to exist',
+    'aria-pressed': String(!!p.voted),
+    onclick: async (e) => {
+      e.preventDefault();
+      if (!state.user) return signIn();
+      btn.disabled = true;
+      try {
+        await api(`/api/posts/${p.id}/vote`, { method: p.voted ? 'DELETE' : 'PUT' });
+        p.vote_count += p.voted ? -1 : 1;
+        p.voted = !p.voted;
+        n.textContent = p.vote_count;
+        btn.classList.toggle('on', p.voted);
+        btn.setAttribute('aria-pressed', String(p.voted));
+      } catch (err) { toast(err.message); }
+      btn.disabled = false;
+    },
+  }, h('span', { class: 'arrow' }, '▲'), n);
+  return btn;
+}
+
+function postCard(p, { showKind = false } = {}) {
+  const link = h('a', { href: `#/p/${p.id}`, class: 'card post-link' },
+    h('h2', { class: 'post-title' }, p.title),
+    byline(p.author, p.author_name, p.created_at, pills(p, showKind)),
+    h('p', { class: 'excerpt' }, p.excerpt + (p.truncated ? '…' : ''))
+  );
+  if (p.kind !== 'idea' || showKind) return link;
+  return h('div', { class: 'card idea-card' }, voteButton(p), link);
+}
+
+function feed(query, emptyText, cardOptions) {
   const list = h('div', { class: 'stack' });
   const more = h('button', { class: 'more' }, 'Load more');
   let before = null;
+  let offset = 0;
   async function load() {
     more.disabled = true;
     try {
       const qs = new URLSearchParams(query);
-      if (before) qs.set('before', before);
+      if (query.sort === 'top') qs.set('offset', offset);
+      else if (before) qs.set('before', before);
       const { posts, more: hasMore } = await api(`/api/posts?${qs}`);
-      if (!before && !posts.length) list.append(h('p', { class: 'empty' }, emptyText));
-      posts.forEach((p) => list.append(postCard(p)));
+      if (!before && !offset && !posts.length) list.append(h('p', { class: 'empty' }, emptyText));
+      posts.forEach((p) => list.append(postCard(p, cardOptions)));
       if (posts.length) before = posts[posts.length - 1].id;
+      offset += posts.length;
       more.hidden = !hasMore;
     } catch (err) {
       toast(err.message);
@@ -192,8 +245,23 @@ function feed(query, emptyText) {
 
 function homeView() {
   return h('div', { class: 'stack' },
-    state.user ? composer() : welcome(),
-    feed({}, 'Nothing here yet. Be the first to say what you\'re working on.')
+    state.user ? composer('update') : welcome(),
+    feed({ kind: 'update' }, 'Nothing here yet. Be the first to say what you\'re working on.')
+  );
+}
+
+function ideasView(sort) {
+  return h('div', { class: 'stack' },
+    state.user ? composer('idea') : h('section', { class: 'card welcome' },
+      h('h1', null, 'Ideas to build'),
+      h('p', null, 'Things people wish existed. Upvote the ones you want, or pick one up and build it. Connect a wallet to suggest an idea.'),
+      h('button', { class: 'primary', onclick: signIn }, 'Connect wallet')),
+    h('div', { class: 'section-head' },
+      h('p', null, 'Upvote what you want to exist. Pick one up and run with it.'),
+      h('div', { class: 'seg', role: 'tablist' },
+        h('a', { href: '#/ideas', class: sort === 'top' ? 'active' : '' }, 'Top'),
+        h('a', { href: '#/ideas/new', class: sort === 'new' ? 'active' : '' }, 'New'))),
+    feed({ kind: 'idea', sort }, 'No ideas yet. Suggest something you wish someone would build.')
   );
 }
 
@@ -237,16 +305,49 @@ async function postView(id) {
     replyBox = h('div', { class: 'card row' }, h('span', { class: 'meta' }, 'Connect a wallet to reply.'), h('button', { class: 'primary', onclick: signIn }, 'Connect wallet'));
   }
 
-  return h('div', null,
-    h('a', { href: '#/', class: 'back' }, '← All posts'),
+  const isIdea = post.kind === 'idea';
+  const home = isIdea ? '#/ideas' : '#/';
+
+  let ideaPanel = null;
+  if (isIdea) {
+    const buildBtn = h('button', {
+      class: 'build-btn' + (post.building ? ' on' : ''),
+      onclick: async () => {
+        if (!state.user) return signIn();
+        buildBtn.disabled = true;
+        try {
+          await api(`/api/posts/${post.id}/build`, { method: post.building ? 'DELETE' : 'PUT' });
+          toast(post.building ? 'You\'re no longer listed as building this' : 'You\'re building this. Post an update when you have something to show!');
+          route();
+        } catch (e) { toast(e.message); buildBtn.disabled = false; }
+      },
+    }, post.building ? '✓ You\'re building this' : '🛠 I\'m building this');
+
+    ideaPanel = h('div', null,
+      h('div', { class: 'actions' }, voteButton(post), buildBtn),
+      post.building ? h('p', { class: 'hint' }, 'Click again to step back. Share progress under "What people are doing".') : null,
+      h('div', { class: 'builders' },
+        h('h4', null, post.builders.length ? `Being built by ${plural(post.builders.length, 'person', 'people')}` : 'Nobody has picked this up yet'),
+        post.builders.length
+          ? h('ul', null, post.builders.map((b) => h('li', null,
+              h('a', { href: `#/u/${b.address}` }, dot(b.address), nameOf(b.address, b.name)))))
+          : h('p', { class: 'hint', style: 'margin:0' }, 'Want to run with it? Click "I\'m building this" so others know.'))
+    );
+  }
+
+  return h('div', { 'data-kind': post.kind },
+    h('a', { href: home, class: 'back' }, isIdea ? '← All ideas' : '← All posts'),
     h('article', { class: 'card' },
       h('h1', { class: 'post-title', style: 'font-size:24px' }, post.title),
-      byline(post.author, post.author_name, post.created_at,
+      byline(post.author, post.author_name, post.created_at, [
+        isIdea ? h('span', { class: 'pill idea' }, 'idea') : null,
         mine ? h('button', { class: 'link danger', onclick: async () => {
-          if (!confirm('Delete this post and its replies?')) return;
-          try { await api(`/api/posts/${post.id}`, { method: 'DELETE' }); location.hash = '#/'; } catch (e) { toast(e.message); }
-        } }, 'delete') : null),
-      h('p', { class: 'body' }, post.body)
+          if (!confirm(`Delete this ${isIdea ? 'idea' : 'post'} and its replies?`)) return;
+          try { await api(`/api/posts/${post.id}`, { method: 'DELETE' }); location.hash = home; } catch (e) { toast(e.message); }
+        } }, 'delete') : null,
+      ]),
+      h('p', { class: 'body' }, post.body),
+      ideaPanel
     ),
     h('section', { class: 'replies' }, h('h3', null, `${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}`), replyList),
     h('div', { style: 'margin-top:16px' }, replyBox)
@@ -281,7 +382,7 @@ function profileView(address) {
 
   return h('div', null,
     h('a', { href: '#/', class: 'back' }, '← All posts'),
-    h('div', { class: 'stack' }, head, feed({ author: address }, mine ? 'You haven\'t posted yet.' : 'No posts yet.'))
+    h('div', { class: 'stack' }, head, feed({ author: address }, mine ? 'You haven\'t posted yet.' : 'No posts yet.', { showKind: true }))
   );
 }
 
@@ -290,11 +391,23 @@ async function route() {
   document.title = 'wyd';
   const hash = location.hash.replace(/^#/, '') || '/';
   let m;
+  const setTab = (tab) => document.querySelectorAll('#tabs a').forEach((a) => a.classList.toggle('active', a.dataset.tab === tab));
   try {
     let node;
-    if ((m = hash.match(/^\/p\/(\d+)$/))) node = await postView(m[1]);
-    else if ((m = hash.match(/^\/u\/(0x[0-9a-fA-F]{40})$/))) node = profileView(m[1]);
-    else node = homeView();
+    if ((m = hash.match(/^\/p\/(\d+)$/))) {
+      node = await postView(m[1]);
+      setTab(node.dataset.kind === 'idea' ? 'ideas' : 'updates');
+    } else if ((m = hash.match(/^\/u\/(0x[0-9a-fA-F]{40})$/))) {
+      node = profileView(m[1]);
+      setTab(null);
+    } else if ((m = hash.match(/^\/ideas(?:\/(new))?$/))) {
+      node = ideasView(m[1] ? 'new' : 'top');
+      setTab('ideas');
+      document.title = 'Ideas · wyd';
+    } else {
+      node = homeView();
+      setTab('updates');
+    }
     $view.replaceChildren(node);
   } catch (err) {
     $view.replaceChildren(h('div', null, h('a', { href: '#/', class: 'back' }, '← All posts'), h('p', { class: 'empty' }, err.message)));
