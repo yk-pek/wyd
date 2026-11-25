@@ -151,3 +151,4 @@ main.wrap { padding-top: 16px; padding-bottom: 40px; }
   box-shadow: 0 6px 24px rgba(0,0,0,.18); max-width: calc(100% - 40px);
 }
 .foot { color: var(--muted); font-size: 13px; padding-bottom: 30px; font-family: var(--mono); }
+.wallet-option .chain { margin-left: auto; font: 500 12px var(--mono); color: var(--muted); }

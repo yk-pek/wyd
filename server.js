@@ -111,19 +111,56 @@ const AUTHOR_FIELDS = `p.author, COALESCE(u.display_name, '') AS author_name`;
 
 // ---------- auth ----------
 
+// ---- Solana helpers: base58 addresses are ed25519 public keys ----
+const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function base58Decode(s) {
+  let n = 0n;
+  for (const c of s) {
+    const i = B58.indexOf(c);
+    if (i < 0) return null;
+    n = n * 58n + BigInt(i);
+  }
+  let hex = n === 0n ? '' : n.toString(16);
+  if (hex.length % 2) hex = '0' + hex;
+  let zeros = 0;
+  while (zeros < s.length && s[zeros] === '1') zeros++;
+  return Buffer.concat([Buffer.alloc(zeros), Buffer.from(hex, 'hex')]);
+}
+function isSolanaAddress(s) {
+  if (typeof s !== 'string' || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s)) return false;
+  const bytes = base58Decode(s);
+  return !!bytes && bytes.length === 32;
+}
+const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+function verifySolana(message, signatureHex, address) {
+  if (!/^(0x)?[0-9a-fA-F]{128}$/.test(signatureHex)) return false;
+  const key = crypto.createPublicKey({ key: Buffer.concat([ED25519_SPKI_PREFIX, base58Decode(address)]), format: 'der', type: 'spki' });
+  return crypto.verify(null, Buffer.from(message, 'utf8'), key, Buffer.from(signatureHex.replace(/^0x/, ''), 'hex'));
+}
+
+// An address in the form we store it: Ethereum lowercased, Solana as-is (base58 is case-sensitive).
+function normalizeAddress(s) {
+  if (typeof s !== 'string') return null;
+  if (isAddress(s)) return s.toLowerCase();
+  if (isSolanaAddress(s)) return s;
+  return null;
+}
+
 app.post('/api/auth/nonce', wrap(async (req, res) => {
   rateLimit(`nonce:${req.ip}`, 20, 600_000);
   const { address } = req.body || {};
-  if (typeof address !== 'string' || !isAddress(address)) throw new HttpError(400, 'Invalid wallet address');
-  const checksummed = getAddress(address);
+  const chain = req.body?.chain === 'sol' ? 'sol' : 'eth';
+  const valid = chain === 'sol' ? isSolanaAddress(address) : typeof address === 'string' && isAddress(address);
+  if (!valid) throw new HttpError(400, 'Invalid wallet address');
+  const shown = chain === 'sol' ? address : getAddress(address);
   const nonce = crypto.randomBytes(16).toString('hex');
   const host = requestHost(req);
   const message =
-    `${host} wants you to sign in with your Ethereum account:\n${checksummed}\n\n` +
+    `${host} wants you to sign in with your ${chain === 'sol' ? 'Solana' : 'Ethereum'} account:\n${shown}\n\n` +
     `Sign in to wyd. This only proves you own this address; it costs nothing and sends no transaction.\n\n` +
-    `URI: https://${host}\nVersion: 1\nChain ID: 1\nNonce: ${nonce}\nIssued At: ${new Date().toISOString()}`;
-  await pool.query('INSERT INTO nonces (nonce, address, message) VALUES ($1, $2, $3)', [
-    nonce, checksummed.toLowerCase(), message,
+    `URI: https://${host}\nVersion: 1\n${chain === 'sol' ? 'Chain ID: mainnet' : 'Chain ID: 1'}\nNonce: ${nonce}\nIssued At: ${new Date().toISOString()}`;
+  await pool.query('INSERT INTO nonces (nonce, address, message, chain) VALUES ($1, $2, $3, $4)', [
+    nonce, normalizeAddress(shown), message, chain,
   ]);
   res.json({ nonce, message });
 }));
@@ -137,18 +174,25 @@ app.post('/api/auth/verify', wrap(async (req, res) => {
   const { rows } = await pool.query(
     `UPDATE nonces SET used = true
      WHERE nonce = $1 AND used = false AND created_at > now() - make_interval(mins => $2)
-     RETURNING address, message`,
+     RETURNING address, message, chain`,
     [nonce, NONCE_MINUTES]
   );
   if (!rows[0]) throw new HttpError(400, 'Sign-in request expired, please try again');
 
   let recovered;
-  try {
-    recovered = verifyMessage(rows[0].message, signature).toLowerCase();
-  } catch {
-    throw new HttpError(400, 'Invalid signature');
+  if (rows[0].chain === 'sol') {
+    let ok = false;
+    try { ok = verifySolana(rows[0].message, signature, rows[0].address); } catch { ok = false; }
+    if (!ok) throw new HttpError(401, 'Signature does not match the wallet address');
+    recovered = rows[0].address;
+  } else {
+    try {
+      recovered = verifyMessage(rows[0].message, signature).toLowerCase();
+    } catch {
+      throw new HttpError(400, 'Invalid signature');
+    }
+    if (recovered !== rows[0].address) throw new HttpError(401, 'Signature does not match the wallet address');
   }
-  if (recovered !== rows[0].address) throw new HttpError(401, 'Signature does not match the wallet address');
 
   await pool.query('INSERT INTO users (address) VALUES ($1) ON CONFLICT DO NOTHING', [recovered]);
   const token = crypto.randomBytes(32).toString('base64url');
@@ -197,7 +241,7 @@ const STATS_FIELDS = `
 app.get('/api/posts', wrap(async (req, res) => {
   const params = [req.user ? req.user.address : ''];
   const where = [];
-  const author = typeof req.query.author === 'string' && isAddress(req.query.author) ? req.query.author.toLowerCase() : null;
+  const author = normalizeAddress(req.query.author);
   if (author) {
     params.push(author);
     where.push(`p.author = $${params.length}`);

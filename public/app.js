@@ -45,7 +45,12 @@ async function api(path, { method = 'GET', body } = {}) {
 // ---------- formatting ----------
 const shortAddr = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 const nameOf = (address, name) => name || shortAddr(address);
-const hue = (a) => parseInt(a.slice(2, 8), 16) % 360;
+const hue = (a) => {
+  if (a.startsWith('0x')) return parseInt(a.slice(2, 8), 16) % 360;
+  let x = 0;
+  for (const c of a) x = (x * 31 + c.charCodeAt(0)) % 3600;
+  return x % 360;
+};
 const dot = (a) => h('span', { class: 'dot', style: `background: linear-gradient(135deg, hsl(${hue(a)} 80% 60%), hsl(${(hue(a) + 60) % 360} 80% 50%))` });
 
 function ago(iso) {
@@ -89,10 +94,67 @@ window.addEventListener('eip6963:announceProvider', (e) => {
 });
 window.dispatchEvent(new Event('eip6963:requestProvider'));
 
+// Solana wallets register through the Wallet Standard (Phantom, Solflare, Backpack, …).
+const solWallets = new Map();
+const walletStandardApi = {
+  register: (...ws) => {
+    for (const w of ws) {
+      const solana = (w.chains || []).some((c) => String(c).startsWith('solana:'));
+      if (solana && w.features && w.features['standard:connect'] && w.features['solana:signMessage']) solWallets.set(w.name, w);
+    }
+    return () => {};
+  },
+};
+window.addEventListener('wallet-standard:register-wallet', (e) => { try { e.detail(walletStandardApi); } catch {} });
+try { window.dispatchEvent(new CustomEvent('wallet-standard:app-ready', { detail: walletStandardApi })); } catch {}
+
+const bytesToHex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+
+function ethEntry(name, icon, id, provider) {
+  return {
+    name, icon, id: 'eth:' + id, chain: 'Ethereum', provider,
+    connect: async () => (await provider.request({ method: 'eth_requestAccounts' }))[0],
+    sign: (message, address) => provider.request({ method: 'personal_sign', params: [toHex(message), address] }),
+  };
+}
+
+function solStandardEntry(w) {
+  let account = null;
+  return {
+    name: w.name, icon: w.icon, id: 'sol:' + w.name, chain: 'Solana',
+    connect: async () => {
+      const { accounts } = await w.features['standard:connect'].connect();
+      account = (accounts || []).find((a) => (a.chains || []).some((c) => String(c).startsWith('solana:'))) || (accounts || [])[0];
+      return account && account.address;
+    },
+    sign: async (message) => {
+      const [out] = await w.features['solana:signMessage'].signMessage({ account, message: new TextEncoder().encode(message) });
+      return bytesToHex(out.signature);
+    },
+  };
+}
+
+// Older Solana wallets that only inject window.phantom.solana / window.solana.
+function solLegacyEntry(provider, name) {
+  return {
+    name, icon: null, id: 'sol:' + name, chain: 'Solana',
+    connect: async () => (await provider.connect()).publicKey.toString(),
+    sign: async (message) => {
+      const out = await provider.signMessage(new TextEncoder().encode(message), 'utf8');
+      return bytesToHex(out.signature || out);
+    },
+  };
+}
+
 function availableWallets() {
-  const list = [...wallets.values()];
-  if (!list.length && window.ethereum) list.push({ info: { name: 'Browser wallet', rdns: 'injected' }, provider: window.ethereum });
-  return list;
+  const list = [...wallets.values()].map((w) => ethEntry(w.info.name, w.info.icon, w.info.rdns, w.provider));
+  if (!list.length && window.ethereum) list.push(ethEntry('Browser wallet', null, 'injected', window.ethereum));
+  const sol = [...solWallets.values()].map(solStandardEntry);
+  if (!sol.length) {
+    const legacy = (window.phantom && window.phantom.solana) || window.solana;
+    if (legacy && legacy.signMessage) sol.push(solLegacyEntry(legacy, legacy.isPhantom ? 'Phantom' : 'Solana wallet'));
+  }
+  return list.concat(sol);
 }
 
 function modal(title, ...content) {
@@ -113,8 +175,8 @@ function noWalletHelp() {
   modal('No wallet found',
     h('p', null, 'wyd uses a crypto wallet to sign you in. It\'s only a signature: no gas, no transaction, no funds needed.'),
     brave
-      ? h('p', null, 'You\'re on Brave. Either set up Brave\'s built-in wallet (click the wallet icon in the toolbar, or open brave://wallet), or install MetaMask or Rabby. Then reload this page.')
-      : h('p', null, 'Install a browser wallet such as MetaMask or Rabby, then reload this page.'),
+      ? h('p', null, 'You\'re on Brave. Either set up Brave\'s built-in wallet (click the wallet icon in the toolbar, or open brave://wallet), or install an Ethereum wallet like MetaMask or a Solana wallet like Phantom. Then reload this page.')
+      : h('p', null, 'Install an Ethereum wallet such as MetaMask or Rabby, or a Solana wallet such as Phantom or Solflare, then reload this page.'),
     h('p', { class: 'hint' }, 'On a phone, open wyd inside your wallet app\'s browser.')
   );
 }
@@ -126,10 +188,10 @@ function pickWallet() {
   return new Promise((resolve) => {
     const m = modal('Choose a wallet',
       h('div', { class: 'stack' }, list.map((w) =>
-        h('button', { class: 'wallet-option' + (w.info.rdns === last ? ' last' : ''), onclick: () => { m.onclose = null; m.close(); resolve(w); } },
-          w.info.icon ? h('img', { src: w.info.icon, alt: '', width: 24, height: 24 }) : null,
-          h('span', null, w.info.name),
-          w.info.rdns === last ? h('span', { class: 'hint', style: 'margin:0 0 0 auto' }, 'last used') : null))));
+        h('button', { class: 'wallet-option' + (w.id === last ? ' last' : ''), onclick: () => { m.onclose = null; m.close(); resolve(w); } },
+          w.icon ? h('img', { src: w.icon, alt: '', width: 24, height: 24 }) : h('span', { style: 'width:24px' }),
+          h('span', null, w.name),
+          h('span', { class: 'chain' }, w.id === last ? `${w.chain} · last used` : w.chain)))));
     m.onclose = () => resolve(null);
   });
 }
@@ -152,18 +214,18 @@ async function signIn() {
     if (!availableWallets().length) noWalletHelp();
     return;
   }
-  const provider = wallet.provider;
   signingIn = true;
   setConnectLabel('Check your wallet…');
   const timeout = setTimeout(() => { signingIn = false; setConnectLabel(); }, 120_000);
   try {
-    const [address] = await provider.request({ method: 'eth_requestAccounts' });
+    const address = await wallet.connect();
     if (!address) throw new Error('No account selected in your wallet');
-    const { nonce, message } = await api('/api/auth/nonce', { method: 'POST', body: { address } });
-    const signature = await provider.request({ method: 'personal_sign', params: [toHex(message), address] });
+    const chain = wallet.chain === 'Solana' ? 'sol' : 'eth';
+    const { nonce, message } = await api('/api/auth/nonce', { method: 'POST', body: { address, chain } });
+    const signature = await wallet.sign(message, address);
     const { user } = await api('/api/auth/verify', { method: 'POST', body: { nonce, signature } });
-    try { localStorage.setItem('wyd-wallet', wallet.info.rdns); } catch {}
-    watchAccounts(provider);
+    try { localStorage.setItem('wyd-wallet', wallet.id); } catch {}
+    if (wallet.provider) watchAccounts(wallet.provider);
     state.user = user;
     renderAccount();
     route();
@@ -444,7 +506,7 @@ async function postView(id) {
 }
 
 function profileView(address) {
-  address = address.toLowerCase();
+  if (address.startsWith('0x')) address = address.toLowerCase();
   const mine = state.user && state.user.address === address;
   const head = h('div', { class: 'card profile-head stack' });
 
@@ -486,7 +548,7 @@ async function route() {
     if ((m = hash.match(/^\/p\/(\d+)$/))) {
       node = await postView(m[1]);
       setTab(node.dataset.kind === 'idea' ? 'ideas' : 'updates');
-    } else if ((m = hash.match(/^\/u\/(0x[0-9a-fA-F]{40})$/))) {
+    } else if ((m = hash.match(/^\/u\/(0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$/))) {
       node = profileView(m[1]);
       setTab(null);
     } else if ((m = hash.match(/^\/ideas(?:\/(new))?$/))) {
@@ -513,7 +575,7 @@ window.addEventListener('hashchange', route);
   if (state.user) {
     let last = null;
     try { last = localStorage.getItem('wyd-wallet'); } catch {}
-    const w = availableWallets().find((x) => x.info.rdns === last);
-    if (w) watchAccounts(w.provider);
+    const w = availableWallets().find((x) => x.id === last);
+    if (w && w.provider) watchAccounts(w.provider);
   }
 })();

@@ -2,7 +2,7 @@
 
 **what are you doing?** A small forum where people post what they're working on and reply to each other.
 
-- Sign in with an Ethereum wallet (a free signature, no transaction).
+- Sign in with an Ethereum wallet (MetaMask, Rabby, Brave…) or a Solana wallet (Phantom, Solflare, Backpack…). It is a free signature, no transaction.
 - Write posts, reply to posts, delete your own posts and replies.
 - Set an optional display name. Profiles list a person's posts.
 

@@ -47,6 +47,9 @@ CREATE TABLE IF NOT EXISTS replies (
 );
 CREATE INDEX IF NOT EXISTS replies_post_idx ON replies(post_id, id);
 
+-- Sign-in requests remember which chain they're for ('eth' or 'sol').
+ALTER TABLE nonces ADD COLUMN IF NOT EXISTS chain TEXT NOT NULL DEFAULT 'eth';
+
 -- Ideas: a post of kind 'idea' is a suggestion for something to build.
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'update';
 CREATE INDEX IF NOT EXISTS posts_kind_idx ON posts(kind, id DESC);
